@@ -1,0 +1,1726 @@
+//=====================================================================-*-C++-*-
+// File and Version Information:
+//      $Id: NDimUnfolding.icc 2021-10-10 Sookhyun Lee $
+//
+// Description:
+//      Multidimensional Unfolding class using RooUnfold package and ntuple files.
+//      Train:  construct response matrix
+//      Test:   prepare test data for closure test     
+//      Unfold: perform unfolding 1: closure test 2: real data
+//
+// Authors: Sookhyun Lee <shlee@bnl.gov>
+//
+//==============================================================================
+
+#ifndef NDIMUNFOLDING_ICC
+#define NDIMUNFOLDING_ICC
+
+#include "Bins.h"
+#include "NDimUnfolding.h"
+
+#ifndef NOROOFIT
+#define USE_ROOFIT
+#endif
+
+#include <cfloat>
+#include <algorithm>
+#if !defined(__CINT__) || defined(__MAKECINT__)
+#include <iostream>
+
+#include "TROOT.h"
+#include "TString.h"
+#include "TStyle.h"
+#include "TCanvas.h"
+#include "TLegend.h"
+#include "TRandom.h"
+#include "TPostScript.h"
+#include "TH1D.h"
+#include "TH2D.h"
+#include "TH3D.h"
+#include "TF1.h"
+#include "TFile.h"
+#include "TVectorD.h"
+#include "TLine.h"
+#include "TNtuple.h"
+#include "TProfile.h"
+#include "RooUnfoldErrors.h"
+#include "RooUnfoldParms.h"
+#include "RooUnfoldResponse.h"
+#include "RooUnfold.h"
+#ifdef USE_TUNFOLD_H
+#include "RooUnfoldTUnfold.h"
+#endif
+#include "TPaveText.h"
+#include "TLatex.h"
+#endif
+#include "ArgVars.h"
+
+//==============================================================================
+// MC generation routine: RooUnfoldTestPdf()
+//==============================================================================
+
+#ifdef USE_ROOFIT
+#include "RooUnfoldTestPdfRooFit.icc"
+#include "RooRandom.h"
+#else
+#include "RooUnfoldTestPdf.icc"
+#endif
+
+#if !defined(__CINT__) || defined(__MAKECINT__)
+using std::cout;
+using std::cerr;
+using std::endl;
+#endif
+
+void NDimUnfolding::SetMethod(int _method)
+{
+  method = _method;
+}
+
+void NDimUnfolding::SetDimension(Int_t _dim)
+{
+  dim = _dim;
+  switch(dim)
+  {
+   case 1:
+   onepage =4;
+   break;
+   case 2:
+   onepage =8;
+   break;
+   case 3:
+   onepage =10; 
+   default:
+   break;
+  }
+}
+
+int NDimUnfolding::GetDimension()
+{
+  return dim;
+}
+
+void NDimUnfolding::SetX1Name(const TString& x1nam)
+{
+  varnamex1 = x1nam;
+}
+
+TString& NDimUnfolding::GetX1Name()
+{
+  return varnamex1;
+}
+
+void NDimUnfolding::SetX2Name(const TString& x2nam)
+{
+  varnamex2 = x2nam;
+}
+
+TString& NDimUnfolding::GetX2Name()
+{
+  return varnamex2;
+}
+
+void NDimUnfolding::SetX3Name(const TString& x3nam)
+{
+  varnamex3 = x3nam;
+}
+
+TString& NDimUnfolding::GetX3Name()
+{
+  return varnamex3;
+}
+
+void NDimUnfolding::SetClosureTest(Bool_t do_ct)
+{
+  do_closure_test = do_ct;
+}
+
+void NDimUnfolding::SetBinsDefault()
+{
+
+  TString vnam;
+  float* bins;
+  for(int d=0; d<GetDimension(); ++d){
+   if(d==0) vnam = GetX1Name();
+   else if(d==1) vnam = GetX2Name();
+   else if(d==2) vnam = GetX3Name();
+
+    if(vnam.Contains("Q2"))
+    { 
+     varbins[d] = Q2bins; cout<<"Q2bins[2] "<< varbins[d][2]<<endl;
+     SetNMeasuredBins(d,nbinsQ2); 
+     continue;
+    }
+    if(vnam.Contains("x"))
+    {
+     varbins[d] = xbins; cout<<"xbins[2] "<< varbins[d][2]<<endl;
+     SetNMeasuredBins(d, nbinsx);
+     continue;
+    }
+    if(vnam.Contains("tau") || vnam.Contains("G1J"))
+    { 
+     varbins[d] = taubins; cout<<"taubins[2] "<< varbins[d][2]<<endl;
+     SetNMeasuredBins(d,nbinstau);
+     continue;
+    }
+  }
+} 
+
+void NDimUnfolding::SetNMeasuredBins(int var, int nbins)
+{
+  if (var == 0) nmx1 = nbins;
+  else if (var == 1) nmx2 =  nbins;
+  else if (var == 2) nmx3 = nbins;  
+}
+
+int NDimUnfolding::GetNMeasuredBins(int var)
+{
+  if (var == 0) return nmx1; 
+  if (var == 1) return nmx2;
+  if (var == 2) return nmx3;
+  return -9;
+}
+
+
+
+//==============================================================================
+// Test parameters
+//==============================================================================
+
+void NDimUnfolding::Parms (ArgVars& args)
+{
+
+  TString methodHelp, methodHelp2, stageHelp;  // TString::Form seems to be limited to 4 parameters in CINT.
+  methodHelp.Form ("unfolding method: %d=none, %d=Bayes, %d=SVD, ",
+                   RooUnfold::kNone,     RooUnfold::kBayes,   RooUnfold::kSVD);
+  methodHelp2.Form("%d=bin-by-bin, %d=TUnfold, %d=invert, %d=IDS",
+                   RooUnfold::kBinByBin, RooUnfold::kTUnfold, RooUnfold::kInvert, RooUnfold::kIDS);
+  methodHelp += methodHelp2;
+  stageHelp.Form ("1=train (writes %s.root), 2=test (reads), 0=both (default)", GetName());
+  args.Add ("method",  &method,       RooUnfold::kBayes, methodHelp.Data());
+  args.Add ("stage",   &stage,        0, stageHelp.Data());
+  args.Add ("inmc",    &inmc,         "/Users/susan/analysis/h1/eventshape/unfolding/trees/RapgapTree.root","MC file name" );
+  args.Add ("indata",  &indata,       "/Users/susan/analysis/h1/eventshape/unfolding/trees/DataTree.root");
+  args.Add ("varnamex1",&varnamex1,     "tau1b");
+  args.Add ("varnamex2",&varnamex2,     "Q2");
+  args.Add ("varnamex3",&varnamex3,     "x");
+  args.Add ("ftrainx1", &ftrainx1,      0, "training X PDF: 0=flat, 1=top-hat, 2=Gaussian, 3=double exp, 4=B-W, 5=double B-W, 6=exp, 7=Gaussian+exp");
+  args.Add ("ftestx1",  &ftestx1,       5, "test X PDF");
+  args.Add ("ntx1",     &ntx1,         40, "#truth X bins");
+  args.Add ("ntest",   &ntest,   100000, "#events to use for testing");
+  args.Add ("ntrain",  &ntrain,  100000, "#events to use for training");
+  args.Add ("x1lo",     &x1lo,        0.0, "X range minimum");
+  args.Add ("x1hi",     &x1hi,       10.0, "X range maximum");
+  args.Add ("regparm", &regparm,  -1e30, "regularisation parameter (default: Bayes niter=3, SVD kterm=ntx1/2)", "");
+#ifdef USE_TUNFOLD_H
+  args.Add ("regmethod",&regmethod,   2, "TUnfold regularisation method (0=none, 1=size, 2=derivative, 3=curvature)");
+#endif
+  args.Add ("onepage", &onepage,      4, "number of plots to include on the page, or 0 for all plots on separate pages");
+  args.Add ("doerror", &doerror,      RooUnfold::kCovariance,
+                                         "error treatment (0=none, 1=error propagation, 2=covariance propagation, 3=toy MC)");
+  args.Add ("dosys",   &dosys,        0, "include systematic errors from response matrix: 0=stat only, 1=stat+sys, 2=sys only");
+  args.Add ("nmx1",     &nmx1,         -1, "#measured X bins", "ntx1");
+  args.Add ("mtrainx1", &mtrainx1,    5.0, "training signal PDF X mean");
+  args.Add ("wtrainx1", &wtrainx1,    1.2, "training signal PDF X width");
+  args.Add ("btrainx1", &btrainx1,    0.2, "training X PDF background fraction");
+  args.Add ("mtestx1",  &mtestx1,     5.5, "test signal PDF X mean");
+  args.Add ("wtestx1",  &wtestx1,     1.0, "test signal PDF X width");
+  args.Add ("btestx1",  &btestx1,     0.3, "test X PDF background fraction");
+  args.Add ("doeff",   &doeff,        1, "include efficiencies in the response model");
+  args.Add ("effx1lo",  &effx1lo,     0.5, "efficiency at x1lo");
+  args.Add ("effx1hi",  &effx1hi,     0.9, "efficiency at x1hi");
+  args.Add ("x1bias",   &x1bias,     -1.0, "shift in X");
+  args.Add ("x1smear",  &x1smear,     0.5, "X smearing width in bins");
+  args.Add ("addfakes",&addfakes,     0, "include fakes in the response model");
+  args.Add ("fakex1lo", &fakex1lo,    0.2, "fraction of fakes at x1lo");
+  args.Add ("fakex1hi", &fakex1hi,    0.5, "fraction of fakes at x1hi");
+  args.Add ("bincorr", &bincorr,    0.0, "correlation between neighbouring measured bins");
+  args.Add ("overflow",&overflow,     0, "0=unfolding ignores under/overflow bins, 1=unfolding uses under/overflow bins, 2=fill under/overflows into first/last bins");
+  args.Add ("addbias", &addbias,     -1, "apply systematic shift/rotation (disabled by default for bin-by-bin/invert methods)", "1");
+  args.Add ("wpaper",  &wpaper,       0, "paper width", "");
+  args.Add ("hpaper",  &hpaper,       0, "paper height", "");
+  args.Add ("verbose", &verbose,      1, "debug level: 0=warnings, 1=verbose, 2=debug, 3=detailed");
+  args.Add ("draw",    &dodraw,       1, "draw results");
+  args.Add ("ntoys",   &ntoys,       -1, "number of toys for error calculation (doerror=3) or plots (ploterrors=1, default ntoys=500)", "50");
+  args.Add ("ploterrors",&ploterrors, 0, "plot error comparison (ploterrors=1) and chi2 (ploterrors=2)?");
+  args.Add ("plotparms",&plotparms,   0, "plot errors for different regularisation parameters?");
+  args.Add ("minparm", &minparm,  -1e30, "minimum value in regparm scan (with plotparms=1)", "");
+  args.Add ("maxparm", &maxparm,  -1e30, "maximum value in regparm scan (with plotparms=1)", "");
+  args.Add ("stepsize",&stepsize,     0, "step size in regparm scan (with plotparms=1)", "");
+  args.Add ("name",    &setname, GetName(), "name for output files (name.root and name.ps)");
+  args.Add ("seed",    &seed,        -1, "random number seed for test distributions and RooUnfold toy error calculation (use seed=0 for a different seed on each run)", "");
+  args.Add ("fit",     &dofit,        0, "parametric fit of folded function to measured distribution");
+}
+
+//==============================================================================
+// Run tests
+//==============================================================================
+
+Int_t NDimUnfolding::Run()
+{
+  Init();
+  if (error) return error;
+
+  CheckParms();
+  if (error) return error;
+  if (dodraw) SetupCanvas();
+
+  error= RunTests();
+
+  if (dodraw) {
+    ps->Close();
+    delete ps; ps= 0;
+  }
+
+  TFile f (rootfile, "update");
+  // SH Lee
+  // hTrue/hMeas: test data for closure test
+  // hMeas: data
+  // hReco: unfolded
+  const TNamed* objs[] = { unfold, hTrain, hTrainTrue, hTrainFake, hTrue, hMeas, hFake,
+                           hReco, hRes, hPulls, 
+                           hResmat, hCorr, hMeasCorr, hUnfErr, hToyErr, fitFunc, trueFunc, ntChi2,
+                           hParmChi2, hParmErr, hParmRes, hParmRms };
+  for (size_t i= 0; i<sizeof(objs)/sizeof(objs[0]); i++) {
+    if (objs[i]) f.WriteTObject (objs[i], objs[i]->GetName());
+  }
+  f.Close();
+
+  return error;
+}
+
+
+void NDimUnfolding::SetupCanvas()
+{
+  gROOT->SetStyle("Plain");
+  gStyle->SetOptStat(0);
+  gStyle->SetPalette(1,0);
+  if (!onepage)    gStyle->SetOptTitle(0);
+  if (onepage < 3) gStyle->SetHistLineWidth(2);
+  if (onepage) {
+    if (wpaper>0)  gStyle->SetCanvasDefW (wpaper);
+    if (hpaper>0)  gStyle->SetCanvasDefH (hpaper);
+    canvas= new TCanvas (GetName(), GetName(), 1);
+  } else
+    canvas= new TCanvas (GetName(), GetName(), wpaper, hpaper);
+  TString psfile(GetName());
+  psfile += ".ps";
+  ps= new TPostScript (psfile, 112);
+  bool grid= false;
+  if (onepage==2) {
+    gStyle->SetPadTopMargin(0.05);
+    gStyle->SetPadRightMargin(0.02);
+    gStyle->SetPadBottomMargin(0.08);
+    gStyle->SetPadLeftMargin(0.06);
+    canvas->Divide(1,2);
+    TPad* pad1= (TPad*) canvas->GetPad(1);
+    TPad* pad2= (TPad*) canvas->GetPad(2);
+    pad1->SetPad (pad1->GetXlowNDC(), .3, pad1->GetXlowNDC()+pad1->GetWNDC(), pad1->GetYlowNDC()+pad1->GetHNDC());
+    pad2->SetPad (pad2->GetXlowNDC(), pad2->GetYlowNDC(), pad2->GetXlowNDC()+pad2->GetWNDC(), .3);
+    if (grid) {
+      pad1->SetGrid(1);
+      pad2->SetGrid(1);
+    }
+  } else if (onepage>=6) {
+    if (grid) canvas->SetGrid();
+    canvas->Divide(2,(onepage+1)/2);
+  } else if (onepage>=3) {
+    canvas->Divide(1,onepage);
+  } else if (grid)
+    canvas->SetGrid(1);
+  ipad= 0;
+}
+
+
+Int_t NDimUnfolding::RunTests()
+{
+  if (stage != 2) { // if not test only
+    TString name("response"), title;
+    title.Form ("Test %dD", dim);
+    response= new RooUnfoldResponse (name, title);
+    if (!response) return 3;
+    if (overflow==1) response->UseOverflow();
+    if (verbose>=0) cout << "==================================== TRAIN ====================================" << endl;
+    if (!Train()) return 4;
+    TFile f (rootfile, "recreate");
+    f.WriteTObject (response, "response");
+    f.Close();
+  }
+
+  if (stage != 1) { // if not train only
+    if (!response) {
+      cout << "Read 'response' object from " << rootfile << endl;
+      TFile f (rootfile);
+      f.GetObject ("response", response);
+      f.Close();
+      if (!response) {
+        cerr << "could not read 'response' object from " << rootfile << endl;
+        return 5;
+      }
+    }
+    if (verbose>=0) cout << "==================================== TEST =====================================" << endl;
+
+    if (do_closure_test && !Test())   return 6;
+    if (verbose>=0) cout << "==================================== UNFOLD ===================================" << endl;
+
+
+    if (!Unfold()) {
+      if (dofit) Fit();
+      if (dodraw) Results();
+      return 7;
+    }
+
+    if (dofit) Fit();
+
+    if (dodraw) {
+      if (!plotparms){
+        if (stage == 0) TrainResults();
+        Results();
+      }
+//      if (ploterrors) PlotErrors();
+//      if (plotparms)  PlotParms();
+    }
+  
+  }
+
+  return 0;
+}
+
+//==============================================================================
+// Train: create response matrix
+//==============================================================================
+
+Int_t NDimUnfolding::Train()
+{
+
+  int dime = GetDimension();
+  // 1D/2D/3D unfolding
+  switch(dime)
+  {
+  case 1:
+  hTrainTrue= new TH1D ("traintrue", "Training Truth", ntx1, varbins[0]);
+  hTrainTrue->SetXTitle(GetX1Name().Data());
+  hTrainTrue->SetLineColor(kBlue);
+  hTrain= new TH1D ("train", "Training Measured", nmx1, varbins[0]);
+  hTrain->SetXTitle(GetX1Name().Data());
+  hTrain->SetLineColor(kRed);  
+  break;
+
+  case 2:
+  hTrainTrue= new TH2D ("traintrue", "Training Truth", ntx1, varbins[0], ntx2, varbins[1]);
+  hTrainTrue->SetXTitle(GetX1Name().Data());
+  hTrainTrue->SetYTitle(GetX2Name().Data());
+  hTrainTrue->SetLineColor(kBlue);
+  hTrain= new TH2D ("train", "Training Measured", nmx1, varbins[0], nmx2, varbins[1]);
+  hTrain->SetXTitle(GetX1Name().Data());
+  hTrain->SetYTitle(GetX2Name().Data());
+  hTrain->SetLineColor(kRed);
+  break;
+
+  case 3:
+  hTrainTrue= new TH3D ("traintrue", "Training Truth", ntx1, varbins[0], ntx2, varbins[1], ntx3, varbins[2]);
+  hTrainTrue->SetLineColor(kBlue);
+  hTrainTrue->SetXTitle(GetX1Name().Data());
+  hTrainTrue->SetYTitle(GetX2Name().Data());
+  hTrainTrue->SetZTitle(GetX3Name().Data());
+  hTrain= new TH3D ("train", "Training Measured", nmx1, varbins[0], nmx2, varbins[1], nmx3, varbins[2]);
+  hTrain->SetLineColor(kRed);
+  hTrain->SetXTitle(GetX1Name().Data());
+  hTrain->SetYTitle(GetX2Name().Data());
+  hTrain->SetZTitle(GetX3Name().Data());
+  break;
+  }
+
+  response->Setup (hTrain, hTrainTrue);
+
+  //  no efficiency/ no overflow
+  for (Int_t i= 0; i<ntrain; i++) {
+    ttMC->GetEntry(i);
+    
+    switch(dime)
+    {
+
+    case 1:
+    if(x1m==0) break; // tau1b bound
+    if(i<200) cout<<"tau1b true: "<< x1t << ", measured: "<< x1m<<endl;
+    Fill(hTrainTrue, x1t);
+    Fill (hTrain, x1m);
+    response->Fill (x1m, x1t);
+    break;
+
+    case 2:
+    if(x1m==0 || x2m==0) break;
+    if(i<200) cout<<"tau true: "<< x2t << ", measured: "<< x2m<<endl;
+    Fill(hTrainTrue, x1t, x2t);
+    Fill (hTrain, x1m, x2m);
+    response->Fill (x1m, x2m, x1t, x2t);
+    break;
+
+    case 3:
+    if(x1m==0 || x2m==0 || x3m==0) break;
+    if(i<200) cout<<"x3 true: "<< x3t << ", measured: "<< x3m<<endl;
+    Fill(hTrainTrue, x1t, x2t, x3t);
+    Fill (hTrain, x1m, x2m, x3m);   
+    response->Fill (x1m, x2m, x3m, x1t, x2t, x3t);
+    break;
+    }
+
+
+/* If you want to add efficiency/overflow
+    Double_t x1t= (*&x1true)[i], x2t= (*&x2true)[i], x3t= (*&x3true)[i];
+    Fill (hTrainTrue, x1t, x2t, x3t);
+
+    ///  no efficiency/ no overflow
+    if (Eff3D (x1t, x2t, x3t)) {
+      Double_t x= x1t, x2= x2t, x3= x3t;
+      Smear3D (x1, x2, x3);
+    Fill (hTrain, x1, x2, x3);
+    response->Fill (x1, x2, x3, x1t, x2t, x3t);
+    } else {
+      response->Miss (x1t, x2t, x3t);
+    }
+*/
+  }
+
+/*
+  TVectorD xfake, yfake, zfake;
+  Int_t nfake= Fakes3D (xfake, yfake, zfake, ntrain);
+  if (nfake>0) {
+    hTrainFake= new TH3D ("trainfake", "Training Fakes", nmx1, x1lo, x1hi, nmx2, x2lo, x2hi, nmx3, x3lo, x3hi);
+    hTrainFake->SetLineColor(93);
+    for (Int_t i= 0; i<nfake; i++) {
+      Double_t xf= (*&xfake)[i], yf= (*&yfake)[i], zf= (*&zfake)[i];
+      Fill (hTrain,     xf, yf, zf);
+      Fill (hTrainFake, xf, yf, zf);
+      response  ->Fake (xf, yf, zf);
+    }
+    hTrainFakeX= ProjectionX (hTrainFake, "hTrainFakeX", "Training Fakes X");
+    hTrainFakeY= ProjectionY (hTrainFake, "hTrainFakeY", "Training Fakes Y");
+    hTrainFakeZ= ProjectionZ (hTrainFake, "hTrainFakeZ", "Training Fakes Z");
+  }
+*/
+  
+
+  switch(dime)
+  {
+  case 2:
+  hTrainTrueX1= ProjectionX (hTrainTrue, "hTrainTrueX1", "Training X1");
+  hTrainTrueX2= ProjectionY (hTrainTrue, "hTrainTrueX2", "Training X2");
+  hTrainX1=     ProjectionX (hTrain,     "hTrainX1",     "Training Measured X1");
+  hTrainX2=     ProjectionY (hTrain,     "hTrainX2",     "Training Measured X2");
+  break;
+
+/*
+  case 3:
+  hTrainTrueX1= ProjectionXFrom3D (hTrainTrue, "hTrainTrueX1", "Training X1");
+  hTrainTrueX2= ProjectionYFrom3D (hTrainTrue, "hTrainTrueX2", "Training X2");
+  hTrainTrueX3= ProjectionZFrom3D (hTrainTrue, "hTrainTrueX3", "Training X3");
+  hTrainX1=     ProjectionXFrom3D (hTrain,     "hTrainX1",     "Training Measured X1");
+  hTrainX2=     ProjectionYFrom3D (hTrain,     "hTrainX2",     "Training Measured X2");
+  hTrainX3=     ProjectionZFrom3D (hTrain,     "hTrainX3",     "Training Measured X3");
+
+  hTrainTrueX1X2= ProjectionXYFrom3D (hTrainTrue, "hTrainTrueX1X2", "Training X1X2");
+  hTrainTrueX2X3= ProjectionYZFrom3D (hTrainTrue, "hTrainTrueX2X3", "Training X2X3");
+  hTrainTrueX1X3= ProjectionXZFrom3D (hTrainTrue, "hTrainTrueX1X3", "Training X1X3");
+  hTrainX1X2= ProjectionXYFrom3D (hTrain, "hTrainX1X2", "Training Measured X1X2");
+  hTrainX2X3= ProjectionYZFrom3D (hTrain, "hTrainX2X3", "Training Measured X2X3");
+  hTrainX1X3= ProjectionXZFrom3D (hTrain, "hTrainX1X3", "Training Measured X1X3");
+*/
+  break;
+
+  default:
+  break;
+  }
+
+  cout<<"Training complete "<<endl;
+  return 1;
+}
+
+void NDimUnfolding::TrainResults()
+{
+  switch(GetDimension()){
+   case 1:
+    if (mscalex1!=1.0) {
+      // should really use Sumw2() for these, but we don't show errors
+      hTrain->Scale(mscalex1,"nosw2");
+      if (hTrainFake) hTrainFake->Scale(mscalex1,"nosw2");
+    }
+    setmax (hTrainTrue, hTrain, hTrainFake);
+
+    if (onepage && (onepage<4 || ipad>=onepage)) return;
+    if (onepage) canvas->cd(++ipad);
+    hTrainTrue->Draw();
+    hTrain->Draw("SAME");
+    if (hTrainFake) hTrainFake->Draw("SAME");
+    if (!onepage) Legend (lTrain, hTrainTrue, hTrainFake, hTrain);
+    canvas->Update();
+    break;
+
+    case 2:
+
+    if (mscalex1!=1.0) {
+      hTrainX1->Scale(mscalex1,"nosw2");
+      if (hTrainFakeX1) hTrainFakeX1->Scale(mscalex1,"nosw2");
+    }
+    if (mscalex2!=1.0) {
+      hTrainX2->Scale(mscalex2,"nosw2");
+      if (hTrainFakeX2) hTrainFakeX2->Scale(mscalex2,"nosw2");
+    }
+ 
+    setmax (hTrainTrueX1, hTrainX1);
+    setmax (hTrainTrueX2, hTrainX2);
+ 
+    if (onepage && (onepage<7 || ipad>=onepage)) return;
+    if (onepage) canvas->cd(++ipad);
+    hTrainTrueX1->Draw();
+    hTrainX1->Draw("SAME");
+    if (!onepage) Legend (lTrain, hTrainTrueX1, hTrainFakeX1, hTrainX1);
+    canvas->Update();
+
+    if (onepage && ipad>=onepage) return;
+    if (onepage) canvas->cd(++ipad);
+    hTrainTrueX2->Draw();
+    hTrainX2    ->Draw("SAME");
+    if (!onepage) lTrain->Draw();
+    canvas->Update();
+ 
+    break;
+
+    default:
+    break;
+  }
+
+}
+
+//==============================================================================
+// Test distribution
+//==============================================================================
+
+Int_t NDimUnfolding::Test()
+{
+  // SH Lee
+  // Here we perform closure tests : 
+  // Split data into two and use a half for training and the other half for closure test
+
+  // 1D/2D/3D unfolding
+  switch(GetDimension())
+  {
+  case 1:
+  hTrue= new TH1D ("truth", "Test", ntx1, varbins[0]);
+  hTrue->SetXTitle(GetX1Name().Data());
+  hTrue->SetLineColor(kBlue);
+  hMeas= new TH1D ("meas", "Test Measured", nmx1, varbins[0]);
+  hMeas->SetXTitle(GetX1Name().Data());
+  hMeas->SetLineColor(kRed);
+  break;
+
+  case 2:
+  hTrue= new TH2D ("truth", "Test (Truth)", ntx1, varbins[0], ntx2, varbins[1]);
+  hTrue->SetXTitle(GetX1Name().Data());
+  hTrue->SetYTitle(GetX2Name().Data());
+  hTrue->SetLineColor(kBlue);
+  hMeas= new TH2D ("meas", "Test (Measured)", nmx1, varbins[0], nmx2, varbins[1]);
+  hMeas->SetXTitle(GetX1Name().Data());
+  hMeas->SetYTitle(GetX2Name().Data());
+  hMeas->SetLineColor(kRed);
+  break;
+
+  case 3:
+  hTrue= new TH3D ("truth", "Test", ntx1, varbins[0], ntx2, varbins[1], ntx3, varbins[2]);
+  hTrue->SetXTitle(GetX1Name().Data());
+  hTrue->SetYTitle(GetX2Name().Data());
+  hTrue->SetZTitle(GetX3Name().Data());
+  hTrue->SetLineColor(kBlue);
+  hMeas= new TH3D ("meas", "Test Measured", nmx1, varbins[0], nmx2, varbins[1], nmx3, varbins[2]);
+  hMeas->SetXTitle(GetX1Name().Data());
+  hMeas->SetYTitle(GetX2Name().Data());
+  hMeas->SetZTitle(GetX3Name().Data());  
+  hMeas->SetLineColor(kRed);
+  break;
+  }
+
+  for (Int_t i=0; i<ntest ; i++) {
+    ttMC->GetEntry(ntrain+i);
+
+    switch(GetDimension())
+    {
+    case 1:
+    if(x1m==0) break; // tau1b bound
+    hTrue->Fill(x1t);
+    hMeas->Fill(x1m);
+    break;
+
+    case 2:
+    if(x1m==0 || x2m==0) break;
+    if(i<200) cout<<"tau1b true: "<< x2t << ", measured: "<< x2m<<endl;
+    Fill(hTrue, x1t, x2t);
+    Fill(hMeas, x1m, x2m);
+    break;
+
+    case 3:
+    if(x1m==0 || x2m==0 || x3m==0) break;
+    Fill(hTrue, x1t, x2t, x3t);
+    Fill(hMeas, x1m, x2m, x3m);
+    break;
+    }
+
+    
+/*    no efficiency
+    if (Eff (xt, x1lo, x1hi, effx1lo, effx1hi)) {
+      Double_t x = Smear   (x1t, ntx1, x1lo, x1hi, x1bias, x1smear);
+      Double_t xo= Overflow (x1, nmx1, x1lo, x1hi);
+      hMeas->Fill(xo);
+    }
+*/
+  }
+
+/*
+  TVectorD xfake;
+  Int_t nfake= Fakes (x1fake, nmx1, ntest, x1lo, x1hi, fakex1lo, fakex1hi);
+  if (nfake>0) {
+    hFake= new TH1D ("fake", "Test Fakes", nmx1, x1lo, x1hi);
+    hFake->SetLineColor(93);
+    for (Int_t i= 0; i<nfake; i++) {
+      Double_t xf= (*&x1fake)[i];
+      hMeas->Fill (xf);
+      hFake->Fill (xf);
+    }
+  }
+*/
+
+  switch(GetDimension())
+  {
+  case 2:
+  hTrueX1= ProjectionX (hTrue, "hTrueX1", "Testing X1");
+  hTrueX2= ProjectionY (hTrue, "hTrueX2", "Testing X2");
+  hMeasX1= ProjectionX (hMeas,     "hMeasX1",     "Measured X1");
+  hMeasX2= ProjectionY (hMeas,     "hMeasX2",     "Measured X2");
+  break;
+
+  case 3:
+  hTrueX1= ProjectionXFrom3D (hTrue, "hTrueX1", "Testing X1");
+  hTrueX2= ProjectionYFrom3D (hTrue, "hTrueX2", "Testing X2");
+  hTrueX3= ProjectionZFrom3D (hTrue, "hTrueX3", "Testing X3");
+  hMeasX1= ProjectionXFrom3D (hMeas,     "hMeasX1",     "Measured X1");
+  hMeasX2= ProjectionYFrom3D (hMeas,     "hMeasX2",     "Measured X2");
+  hMeasX3= ProjectionZFrom3D (hMeas,     "hMeasX3",     "Measured X3");
+  hTrueX1X2= ProjectionXYFrom3D (hTrue, "hTrueX1X2", "Testing X1X2");
+  hTrueX2X3= ProjectionYZFrom3D (hTrue, "hTrueX2X3", "Testing X2X3");
+  hTrueX1X3= ProjectionXZFrom3D (hTrue, "hTrueX1X3", "Testing X1X3");
+  hMeasX1X2= ProjectionXYFrom3D (hMeas, "hMeasX1X2", "Measured X1X2");
+  hMeasX2X3= ProjectionYZFrom3D (hMeas, "hMeasX2X3", "Measured X2X3");
+  hMeasX1X3= ProjectionXZFrom3D (hMeas, "hMeasX1X3", "Measured X1X3");
+  break;
+
+  default:
+  break;
+  }
+  return 1;
+}
+
+//==============================================================================
+// Add bin correlations to measured errors
+//==============================================================================
+
+void NDimUnfolding::SetMeasuredCov ()
+{
+  if (bincorr==0.0) return;
+  TMatrixD cov= unfold->GetMeasuredCov();  // initially diagonal
+  if (bincorr!=999.0) {    // use bincorr=999 to test with truely diagonal matrix
+    Double_t corr= bincorr;
+    for (Int_t k=1; k<nmbins; k++) {
+      for (Int_t i=k; i<nmbins; i++)
+        cov(i,i-k)= cov(i-k,i)= corr*cov(i,i);
+      corr *= bincorr;
+      if (corr==0.0) break;
+    }
+  }
+  unfold->SetMeasuredCov (cov);
+  hMeasCorr= CorrelationHist (cov, "measCor", "Measured correlation matrix",
+                              response->Hresponse()->GetXaxis()->GetXmin(),
+                              response->Hresponse()->GetXaxis()->GetXmax());
+}
+
+//==============================================================================
+// Unfold
+//==============================================================================
+
+Int_t NDimUnfolding::Unfold ()
+{
+  if (verbose>=0) cout << "Create RooUnfold object for method " << method << endl;
+  unfold= RooUnfold::New ((RooUnfold::Algorithm)method, response, hMeas, regparm, "unfold");
+  if (!unfold) return 0;
+  unfold->SetVerbose (verbose);
+  if (ntoys<0) ntoys= (ploterrors) ? 500 : 50;
+  unfold->SetNToys(ntoys);
+  unfold->IncludeSystematics(dosys);
+  SetMeasuredCov();
+  
+#ifdef USE_TUNFOLD_H
+  if (method == RooUnfold::kTUnfold) (dynamic_cast<RooUnfoldTUnfold*>(unfold))->SetRegMethod((TUnfold::ERegMode)regmethod);
+#endif
+  if (verbose>=0) {cout << "Created "; unfold->Print();}
+
+  hReco= unfold->Hreco((RooUnfold::ErrorTreatment)doerror);
+  if (!hReco) return 0;
+  hReco->SetName("reco");
+  hReco->SetLineColor(kBlack);  // otherwise inherits style from hTrainTrue
+  if (verbose>=0) unfold->PrintTable (cout, hTrue, (RooUnfold::ErrorTreatment)doerror);
+  if (verbose>=2 && doerror>=RooUnfold::kCovariance) {
+    TMatrixD covmat= unfold->Ereco((RooUnfold::ErrorTreatment)doerror);
+    TMatrixD errmat(ntbins,ntbins);
+    for (Int_t i=0; i<ntbins; i++)
+      for (Int_t j=0; j<ntbins; j++)
+        errmat(i,j)= covmat(i,j)>=0 ? sqrt(covmat(i,j)) : -sqrt(-covmat(i,j));
+    RooUnfoldResponse::PrintMatrix(errmat,"covariance matrix");
+  }
+
+  // Calculate pulls and residuals
+  hRes=   dynamic_cast<TH1*>(hReco->Clone ("res"));   
+  hRes  ->Reset();
+  hRes  ->SetTitle ("Residuals");
+  hPulls= dynamic_cast<TH1*>(hReco->Clone ("pulls"));
+  hPulls->Reset();
+  hPulls->SetTitle ("Pulls");
+
+  for (Int_t i= 1; i<=ntbins; i++) {
+    if ((hReco->GetBinContent(i)!=0.0 || (doerror && hReco->GetBinError(i)>0.0)) &&
+        (hTrue->GetBinContent(i)!=0.0 || (doerror && hTrue->GetBinError(i)>0.0))) {
+      Double_t res= hReco->GetBinContent(i) - hTrue->GetBinContent(i);
+      Double_t err= hReco->GetBinError  (i);
+      hRes->SetBinContent (i, res);
+      hRes->SetBinError   (i, err);
+      if (err>0.0) {
+        hPulls->SetBinContent (i, res/err);
+        hPulls->SetBinError   (i, 1.0);
+      }
+    }
+  }
+
+  hCorr= CorrelationHist (unfold->Ereco((RooUnfold::ErrorTreatment)doerror),
+                          "corr", "Unfolded correlation matrix",
+                          response->Hresponse()->GetYaxis()->GetXmin(),
+                          response->Hresponse()->GetYaxis()->GetXmax());
+
+  return 1;
+}
+
+//==============================================================================
+// Show results
+//==============================================================================
+
+void NDimUnfolding::Results()
+{
+ switch(GetDimension())
+ {
+ case 1:
+  if (mscalex1!=1.0) {
+    // should really use Sumw2() for these, but we don't show errors
+    hMeas->Scale(mscalex1,"nosw2");
+    if (hFake) hFake->Scale(mscalex1,"nosw2");
+    if (fitFunc) fitFunc->GetHistogram()->Scale(mscalex1,"nosw2");
+  }
+  setmax (hTrue, hMeas, hFake);
+
+  if (hReco) {
+    hReco->SetMarkerStyle(kFullDotLarge);
+    setmax (hTrue, hReco);
+  }
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrue    ->Draw();
+  if (fitFunc)   fitFunc->GetHistogram()->Draw("SAME");
+  if (trueFunc) trueFunc->Draw("LSAME");
+  hMeas    ->Draw("SAME");
+  if (hFake) hFake->Draw("SAME");
+  if (hReco) hReco->Draw("SAME P");
+  Legend (lTest, hTrue, hFake, hMeas, hReco, fitFunc, trueFunc);
+  canvas->Update();
+
+  if (!hReco)        return;
+  if (ploterrors>=2) return;
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hRes->SetMarkerStyle(kFullDotLarge);
+  hRes->Draw();
+  TLine().DrawLine(hRes->GetBinLowEdge(1), 0.0, hRes->GetBinLowEdge(ntx1+1), 0.0);  // draw a line at y=0;
+  canvas->Update();
+
+  if (ploterrors)    return;
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  gPad->Divide(2,1);
+  gPad->cd(1);
+  if (hMeasCorr) {
+    hMeasCorr->Draw("COLZ");
+    canvas->cd(ipad);
+    gPad->cd(2);
+  }
+  hCorr->Draw("COLZ");
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hPulls->SetMarkerStyle(kFullDotLarge);
+  hPulls->Draw("P");
+  TLine().DrawLine(hPulls->GetBinLowEdge(1), 0.0, hPulls->GetBinLowEdge(ntx1+1), 0.0);  // draw a line at pull=0;
+  canvas->Update();
+  break;
+
+  case 2:
+   Results2D();
+  break;
+
+  case 3:
+   Results3D();
+  break;
+  default:
+  break;
+
+ }
+}
+
+void NDimUnfolding::Results2D()
+{
+
+  if (mscalex1!=1.0) {
+    hMeasX1->Scale(mscalex1,"nosw2");
+  }
+  if (mscalex2!=1.0) {
+    hMeasX2->Scale(mscalex2,"nosw2");
+  }
+  setmax (hTrueX1, hMeasX1);
+  setmax (hTrueX2, hMeasX2);
+
+  if (hReco) {
+    hRecoX1= ProjectionX (hReco, "hRecoX1", "Reconstructed X1", "E");
+    hRecoX2= ProjectionY (hReco, "hRecoX2", "Reconstructed X2", "E");
+    hRecoX1->SetMarkerStyle(kFullDotLarge);
+    hRecoX2->SetMarkerStyle(kFullDotLarge);
+    setmax (hTrueX1, hRecoX1);
+    setmax (hTrueX2, hRecoX2);
+  }
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrueX1   ->Draw();
+  hMeasX1   ->Draw("SAME");
+  if (hRecoX1) hRecoX1->Draw("SAME");
+  Legend (lTest, hTrueX1, hFakeX1, hMeasX1, hRecoX1);
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrueX2   ->Draw();
+  hMeasX2   ->Draw("SAME");
+  if (hRecoX2) hRecoX2->Draw("SAME");
+
+  lTest->Draw();
+  canvas->Update();
+
+  if (onepage && (ipad>=onepage || ploterrors)) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrue->Draw();
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  canvas->cd(++ipad);
+  hMeas->Draw();
+  canvas->Update();
+
+  if (!hReco) return;
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hReco->Draw();
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  gStyle->SetPalette(1,0);
+  hCorr->Draw("COLZ");
+  canvas->Update();
+
+}
+
+void NDimUnfolding::Results3D()
+{
+
+  if (mscalex1!=1.0) {
+    hMeasX1->Scale(mscalex1,"nosw2");
+  }
+  if (mscalex2!=1.0) {
+    hMeasX2->Scale(mscalex2,"nosw2");
+  }
+  if (mscalex3!=1.0) {
+    hMeasX3->Scale(mscalex3,"nosw2");
+  }
+  setmax (hTrueX1, hMeasX1);
+  setmax (hTrueX2, hMeasX2);
+  setmax (hTrueX3, hMeasX3);
+
+  if (hReco) {
+    hRecoX1= ProjectionXFrom3D (hReco, "hRecoX", "Reconstructed X", "E");
+    hRecoX2= ProjectionYFrom3D (hReco, "hRecoY", "Reconstructed Y", "E");
+    hRecoX3= ProjectionZFrom3D (hReco, "hRecoZ", "Reconstructed Z", "E");
+    hRecoX1X2= ProjectionXYFrom3D (hReco, "hRecoX1X2", "Reconstructed X1X2");
+    hRecoX2X3= ProjectionYZFrom3D (hReco, "hRecoX2X3", "Reconstructed X2X3");
+    hRecoX1X3= ProjectionXZFrom3D (hReco, "hRecoX1X3", "Reconstructed X1X3");
+    hRecoX1X2->SetMarkerColor(kRed);
+    hRecoX2X3->SetMarkerColor(kRed);
+    hRecoX1X3->SetMarkerColor(kRed);
+    hRecoX1->SetMarkerStyle(kFullDotLarge);
+    hRecoX2->SetMarkerStyle(kFullDotLarge);
+    hRecoX3->SetMarkerStyle(kFullDotLarge);
+    setmax (hTrueX1, hRecoX1);
+    setmax (hTrueX2, hRecoX2);
+    setmax (hTrueX3, hRecoX3);
+  }
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrueX1   ->Draw();
+  hMeasX1   ->Draw("SAME");
+  if (hRecoX1) hRecoX1->Draw("SAME");
+  Legend (lTest, hTrueX1, hFakeX1, hMeasX1, hRecoX1);
+  canvas->Update();
+
+/*
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrueX2   ->Draw();
+  hMeasX2   ->Draw("SAME");
+  if (hRecoX2) hRecoX2->Draw("SAME");
+  lTest->Draw();
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrueX3   ->Draw();
+  hMeasX3   ->Draw("SAME");
+  if (hRecoX3) hRecoX3->Draw("SAME");
+  lTest->Draw();
+  canvas->Update();
+
+  if (!hReco) return;
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  gStyle->SetPalette(1,0);
+  hCorr->Draw("COLZ");
+  canvas->Update();
+
+  hPullsX1= new TProfile ("hPullsX1", "Pulls X1", ntx1, x1lo, x1hi);
+  hPullsX2= new TProfile ("hPullsX2", "Pulls X2", ntx2, x2lo, x2hi);
+  hPullsX3= new TProfile ("hPullsX3", "Pulls X3", ntx3, x3lo, x3hi);
+  for (Int_t ix= 1; ix<=ntx1; ix++) {
+    for (Int_t iy= 1; iy<=ntx2; iy++) {
+      for (Int_t iz= 1; iz<=ntx3; iz++) {
+        if ( hReco->GetBinContent(ix,iy,iz)!=0.0             && hReco->GetBinError(ix,iy,iz)>0.0 &&
+            (hTrue->GetBinContent(ix,iy,iz)!=0.0 || (doerror && hTrue->GetBinError(ix,iy,iz)>0.0))) {
+          Double_t pull= (hReco->GetBinContent(ix,iy,iz) - hTrue->GetBinContent(ix,iy,iz)) / hReco->GetBinError(ix,iy,iz);
+          hPullsX1->Fill (hReco->GetXaxis()->GetBinCenter(ix), pull);
+          hPullsX2->Fill (hReco->GetYaxis()->GetBinCenter(iy), pull);
+          hPullsX3->Fill (hReco->GetZaxis()->GetBinCenter(iz), pull);
+        }
+      }
+    }
+  }
+
+  hPullsX1->SetMarkerStyle(kFullDotLarge);
+  hPullsX2->SetMarkerStyle(kFullDotLarge);
+  hPullsX3->SetMarkerStyle(kFullDotLarge);
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hPullsX1->Draw("P");
+  TLine().DrawLine(hPullsX1->GetBinLowEdge(1), 0.0, hPullsX1->GetBinLowEdge(ntx1+1), 0.0);  // draw a line at pull=0;
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hPullsX2->Draw("P");
+  TLine().DrawLine(hPullsX2->GetBinLowEdge(1), 0.0, hPullsX2->GetBinLowEdge(ntx2+1), 0.0);  // draw a line at pull=0;
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hPullsX3->Draw("P");
+  TLine().DrawLine(hPullsX3->GetBinLowEdge(1), 0.0, hPullsX3->GetBinLowEdge(ntx3+1), 0.0);  // draw a line at pull=0;
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hReco->Draw("surf");
+  canvas->Update();
+
+  if (onepage && (ipad>=onepage || ploterrors)) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrueX1X2->Draw();
+  if (hRecoX1X2) hRecoX1X2->Draw("SAME");
+  canvas->Update();
+
+  if (onepage && (ipad>=onepage || ploterrors)) return;
+  if (onepage) canvas->cd(++ipad);
+  hMeasX1X2->Draw();
+  canvas->Update();
+
+  if (onepage && (ipad>=onepage || ploterrors)) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrueX2X3->Draw();
+  if (hRecoX2X3) hRecoX2X3->Draw("SAME");
+  canvas->Update();
+
+  if (onepage && (ipad>=onepage || ploterrors)) return;
+  if (onepage) canvas->cd(++ipad);
+  hMeasX2X3->Draw();
+  canvas->Update();
+
+  if (onepage && (ipad>=onepage || ploterrors)) return;
+  if (onepage) canvas->cd(++ipad);
+  hTrueX1X3->Draw();
+  if (hRecoX1X3) hRecoX1X3->Draw("SAME");
+  canvas->Update();
+
+  if (onepage && (ipad>=onepage || ploterrors)) return;
+  if (onepage) canvas->cd(++ipad);
+  hMeasX2X3->Draw();
+  canvas->Update();
+*/
+}
+
+void NDimUnfolding::PlotErrors()
+{
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  TH1* t= 0;
+  if (ploterrors>=2) t=hTrue;
+  errors= new RooUnfoldErrors(ntoys,unfold,t);
+  hToyErr=errors->RMSResiduals();
+  hUnfErr=errors->UnfoldingError();
+  setmax(hUnfErr,hToyErr);
+  hUnfErr->Draw("HIST");
+  hToyErr->Draw("P SAME");
+
+  lErrors= new TLegend (0.75, 0.75, 0.894, 0.89);
+  lErrors->SetTextSize(0.05);
+  lErrors->SetTextFont(42);
+  lErrors->AddEntry (hUnfErr, "Unfolding errors", "L");
+  lErrors->AddEntry (hToyErr, "Toy MC RMS",       "P");
+  lErrors->Draw();
+  canvas->Update();
+
+  if (ploterrors<2) return;
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  ntChi2= errors->Chi2();
+  Double_t good_chi= ntChi2->Draw("chi2","abs(chi2)<1e10");
+  if (ntoys>good_chi){
+    TString chi;
+    chi+=(ntoys-good_chi);
+    chi += (" bad #chi^{2}s");
+    TPaveText* pave=new TPaveText;
+    pave->SetFillColor(0);
+    pave->SetX1NDC(0.7);
+    pave->SetX2NDC(0.9);
+    pave->SetY1NDC(0.7);
+    pave->SetY2NDC(0.9);
+    TText *t1=pave->AddText(chi);
+    t1->SetTextSize(0.07);
+    pave->Draw();
+  }
+  canvas->Update();
+}
+
+void NDimUnfolding::PlotParms()
+{
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  parms= new RooUnfoldParms(unfold,(RooUnfold::ErrorTreatment)doerror,hTrue);
+  if (maxparm>minparm) parms->SetMaxParm(maxparm);
+  if (minparm!=-1e30)  parms->SetMinParm(minparm);
+  if (stepsize>0)      parms->SetStepSizeParm(stepsize);
+  hParmChi2= parms->GetChi2();
+  hParmChi2->Draw("P");    
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hParmErr= parms->GetRMSError();
+  hParmErr->Draw("P");    
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hParmRes= parms->GetMeanResiduals();
+  hParmRes->Draw("P"); 
+  canvas->Update();
+
+  if (onepage && ipad>=onepage) return;
+  if (onepage) canvas->cd(++ipad);
+  hParmRms= parms->GetRMSResiduals();
+  hParmRms->Draw("P"); 
+  canvas->Update();
+}
+
+//==============================================================================
+// Parametric Fit - an alternative to unfolding
+//==============================================================================
+
+TF1* NDimUnfolding::FitFunc (Int_t fpdf, TH1* h, Double_t mean, Double_t width, Double_t bkg)
+{
+  // Implement PDFs as TF1 functions. These should match the functions defined in
+  // RooUnfoldTestPdf.icc or RooUnfoldTestPdfRooFit.icc.
+  static const Double_t pi= atan2 (0.0, -1.0);
+  if (bkg<0.0) bkg= 0.0;
+  if (bkg>1.0) bkg= 1.0;
+  if (fpdf==0) bkg= 0.0;
+
+  Int_t nb= h->GetNbinsX();
+  const Double_t nx= h->GetEntries(), x1lo= h->GetXaxis()->GetXmin(), x1hi= h->GetXaxis()->GetXmax();
+  const Double_t xwidth= x1hi-x1lo, unorm= nx * (xwidth / nb);
+  const Double_t norm= unorm*(1.0-bkg), bnorm= unorm*bkg/xwidth;
+
+  TF1* f=0;
+  switch (fpdf) {
+
+    case 0: {
+      f= new TF1 ("trueFunc", "[0]", x1lo, x1hi);
+      f->SetParameters (0, norm / xwidth);
+      break;
+    }
+
+    case 1: {
+      const Double_t fnorm= norm / (6.0*width), xw=0.1*xwidth/nb;
+      // Fit can't cope with a pure step function, so add a slope
+      f= new TF1 ("trueFunc",
+                  Form("[0]*(ROOT::Math::gaussian_cdf((x-[2]+[3])/(%g)) - ROOT::Math::gaussian_cdf((x-[2]-[3])/(%g))) + [1]",xw,xw),
+                  x1lo, x1hi);
+      f->SetParNames   ("norm", "bkg", "low", "width");
+      f->SetParameters (fnorm, bnorm, mean, 3.0*width);
+      f->SetParLimits (0, 0.0, 10.0*fnorm);
+      f->SetParLimits (1, 0.0, 10.0*bnorm);
+      f->SetParLimits (2, x1lo, x1hi);
+      f->SetParLimits (3, 0.0, x1hi-x1lo);
+      break;
+    }
+
+    case 2: {
+      const Double_t fnorm= norm / (sqrt(2*pi) * width);
+      f= new TF1 ("trueFunc", "[0]*exp(-0.5*((x-[2])/[3])**2) + [1]", x1lo, x1hi);
+      f->SetParNames   ("norm", "bkg", "mean", "width");
+      f->SetParameters (fnorm, bnorm, mean, width);
+      f->SetParLimits (0, 0.0, 10.0*fnorm);
+      f->SetParLimits (1, 0.0, 10.0*bnorm);
+      f->SetParLimits (2, x1lo, x1hi);
+      f->SetParLimits (3, 0.0, 5.0*(x1hi-x1lo));
+      break;
+    }
+
+    case 3: {
+      const Double_t fnorm= norm / (2.0*width);
+      f= new TF1 ("trueFunc", "[0]*exp(-abs(x-[2])/[3]) + [1]", x1lo, x1hi);
+      f->SetParNames   ("norm", "bkg", "mean", "width");
+      f->SetParameters (fnorm, bnorm, mean, width);
+      f->SetParLimits (0, 0.0, 10.0*fnorm);
+      f->SetParLimits (1, 0.0, 10.0*bnorm);
+      f->SetParLimits (2, x1lo, x1hi);
+      f->SetParLimits (3, 0.0, 5.0*(x1hi-x1lo));
+      break;
+    }
+
+    case 4: {
+      const Double_t fnorm= norm * width / (2*pi);
+      f= new TF1 ("trueFunc", "[0]/((x-[2])**2+0.25*[3]**2) + [1]", x1lo, x1hi);
+      f->SetParNames   ("norm", "bkg", "mean", "width");
+      f->SetParameters (fnorm, bnorm, mean, width);
+      f->SetParLimits (0, 0.0, 10.0*fnorm);
+      f->SetParLimits (1, 0.0, 10.0*bnorm);
+      f->SetParLimits (2, x1lo, x1hi);
+      f->SetParLimits (3, 0.0, 5.0*(x1hi-x1lo));
+      break;
+    }
+
+    case 5: {
+      const Double_t fnorm= norm * width / (4*pi);
+      f= new TF1 ("trueFunc", "[0]*(1.0/((x-[2])**2+0.25*[4]**2) + 1.0/((x-[3])**2+0.25*[4]**2)) + [1]", x1lo, x1hi);
+      f->SetParNames   ("norm", "bkg", "mean1", "mean2", "width");
+      f->SetParameters (fnorm, bnorm, mean-width, mean+width, width);
+      f->SetParLimits (0, 0.0, 10.0*fnorm);
+      f->SetParLimits (1, 0.0, 10.0*bnorm);
+      f->SetParLimits (2, x1lo, x1hi);
+      f->SetParLimits (3, x1lo, x1hi);
+      f->SetParLimits (4, 0.0, 5.0*(x1hi-x1lo));
+      break;
+    }
+
+    case 6: {
+      const Double_t tau = mean-x1lo;
+      const Double_t fnorm= norm / (tau * (exp(-x1lo/tau) - exp(-x1hi/tau)));
+      f= new TF1 ("trueFunc", "[0]*exp(-x/[2]) + [1]", x1lo, x1hi);
+      f->SetParNames   ("norm", "bkg", "tau");
+      f->SetParameters (fnorm, bnorm, tau);
+      f->SetParLimits (0, 0.0, 10.0*fnorm);
+      f->SetParLimits (1, 0.0, 10.0*bnorm);
+      f->SetParLimits (2, 0.0, 10.0*tau);
+      break;
+    }
+
+    case 7: {
+      const Double_t tau     = mean-x1lo;
+      const Double_t mywidth = width/4.0;
+      const Double_t fexp    = 0.9;
+      const Double_t rnorm= norm / (sqrt(2*pi) * mywidth);
+      const Double_t enorm= norm / (tau * (exp(-x1lo/tau) - exp(-x1hi/tau)));
+      f= new TF1 ("trueFunc", "[0]*exp(-0.5*((x-[3])/[4])**2) + [2]*exp(-x/[5]) + [1]", x1lo, x1hi);
+      f->SetParNames   ("G-norm", "bkg", "E-norm", "mean", "width", "tau");
+      f->SetParameters ((1.0-fexp)*rnorm, bnorm, fexp*enorm, mean, width, tau);
+      f->SetParLimits (0, 0.0, 10.0*rnorm);
+      f->SetParLimits (1, 0.0, 10.0*enorm);
+      f->SetParLimits (2, 0.0, 10.0*bnorm);
+      f->SetParLimits (3, x1lo, x1hi);
+      f->SetParLimits (4, 0.0, 5.0*(x1hi-x1lo));
+      f->SetParLimits (5, 0.0, 10.0*tau);
+      break;
+    }
+
+    default:
+      cerr << "PDF " << fpdf << " not defined" << endl;
+  }
+  //  if (f) f->Print();
+  return f;
+}
+
+
+void NDimUnfolding::Fit ()
+{
+  trueFunc= FitFunc (ftestx1, hTrue, mtestx1+0.3, wtestx1*1.4, btestx1*0.7); // add some fudge to challenge fit
+  if (!trueFunc) return;
+  trueFunc->SetLineColor(kGreen+3);
+  trueFunc->SetNpx(std::max(10*ntbins,100));
+  fitFunc= response->MakeFoldingFunction (trueFunc, 1e-12, verbose>=3);
+  if (!fitFunc) return;
+  fitFunc->SetLineColor(800);
+  hMeas->Fit (fitFunc, (verbose>=2 ? "NV" : verbose>=1 ? "N" : "NQ"));
+}
+
+//==============================================================================
+// Generate PDF using RooUnfoldTestPdf
+//==============================================================================
+
+TH1D* NDimUnfolding::Generate (TVectorD& x, const char* name, const char* title,
+                                      Int_t nt, Int_t fpdf, Int_t nx, Double_t lo, Double_t hi,
+                                      Double_t mean, Double_t width, Double_t bkg,
+                                      Double_t /* bias */, Double_t /* smear */)
+{
+  TH1D* hPDF= new TH1D (name, title, nbPDF, lo, hi);
+  hPDF->SetLineColor(kGreen);
+  hPDF->SetLineWidth(2);
+  if (overflow == 1) {
+    // Fill under/overflow bins too
+    Double_t xbin= (hi-lo) / Double_t(nt);
+    lo -= xbin;
+    hi += xbin;
+  }
+  if (verbose >= 1) cout << "Generate values in range " << lo << " to " << hi << endl;
+  if (!RooUnfoldTestPdf (fpdf, nx, lo, hi, x, hPDF, mean, width, bkg, verbose)) return 0;
+  hPDF->Scale (nbPDF/Double_t(nt), "nosw2");
+  return hPDF;
+}
+
+//==============================================================================
+// Generate fakes using a linear PDF from (x0,y0) to (x1,y1)
+//==============================================================================
+
+Int_t NDimUnfolding::Fakes (TVectorD& x, Int_t nm, Int_t nx, Double_t x0, Double_t x1, Double_t y0, Double_t y1) const
+{
+  if (!addfakes || (y0<=0.0 && y1<=0.0)) return 0;
+  if (overflow == 1) {
+    // Fill under/overflow bins too
+    Double_t xw= x1-x0;
+    if (xw<=0) return 0;
+    Double_t xbin= xw / Double_t(nm), ybin= (y1-y0)*(xbin/xw);
+    x0 -= xbin;
+    x1 += xbin;
+    y0 -= ybin;
+    y1 += ybin;
+  }
+
+  // Reduce x-range to remove negative PDF
+  Double_t yw= y1-y0;
+  if (y0<0.0) {
+    x0= (x0*y1-x1*y0) / yw;
+    y0= 0.0;
+    yw= y1;
+  }
+  if (y1<0.0) {
+    x1= (x0*y1-x1*y0) / yw;
+    y1= 0.0;
+    yw= -y0;
+  }
+
+  Double_t xw= x1-x0;
+  if (xw<=0.0) return 0;
+
+  if (yw==0.0) {
+
+    // uniform PDF
+    nx= Int_t(nx*y0+0.5);  // scale number of events by y0
+    if (nx<=0) return 0;
+    if (verbose >= 1) cout << "Generate " << nx << " fakes in range " << x0 << " to " << x1 << endl;
+    x.ResizeTo(nx);
+    for (Int_t i=0; i<nx; i++)
+      (*&x)[i]= x0 + xw*gRandom->Rndm();
+    return nx;
+
+  } else {
+
+    // linear PDF
+    Double_t c= x1*y0-x0*y1;
+    Double_t N= 0.5*yw*(x1+x0) + c;
+    Double_t xa= -c/yw, xb= (c*c)/(yw*yw) + x0*x0 + 2.0*c*x0/yw, yb= 2.0*N*(xw/yw);
+    nx= Int_t(nx*(N/xw)+0.5);  // scale number of events by integral/xw
+    if (nx<=0) return 0;
+    if (verbose >= 1) cout << "Generate " << nx << " fakes in range " << x0 << " to " << x1 << endl;
+    x.ResizeTo(nx);
+    Int_t nnx= 0;
+    for (Int_t i=0; i<nx; i++) {
+      Double_t u= gRandom->Rndm();
+      Double_t xc2= xb + yb*u;
+      if (xc2<0.0) continue;
+      Double_t xc= sqrt(xc2), xp= xa+xc, xn= xa-xc;
+      Double_t xv;
+      if      (xp>=x0 && xp<x1) xv= xp;   // which root to take? Maybe always this +ve one.
+      else if (xn>=x0 && xn<x1) xv= xn;
+      else continue;
+      (*&x)[nnx++]= xv;
+    }
+    if (nnx < nx) {
+      if (verbose >= 0) cout << "Trouble generating " << nx-nnx << " fakes (of " << nx << ")" << endl;
+      nx= nnx;
+      x.ResizeTo(nx);
+    }
+
+  }
+  return nx;
+}
+
+//==============================================================================
+// Gaussian smearing, systematic translation, and variable inefficiency
+//==============================================================================
+
+bool NDimUnfolding::Eff (Double_t x, Double_t lo, Double_t hi, Double_t efflo, Double_t effhi) const
+{
+  // Apply an efficiency function to the truth.
+  // Efficiency: 30% at x=lo, 90% at x=hi.
+  if (!doeff || (efflo>=1.0 && effhi>=1.0)) return true;
+  Double_t xwidth =  (hi-lo);
+  Double_t slope = (effhi-efflo) / xwidth;
+  Double_t yeff= (efflo + slope * (x-lo));  // efficiency
+  // MC test: if random number < eff then accept
+  return (gRandom->Rndm() < yeff);
+}
+
+Double_t NDimUnfolding::Smear (Double_t x, Int_t nt, Double_t lo, Double_t hi, Double_t bias, Double_t smear) const
+{
+  // Apply a gaussian smearing and systematic translation to the truth.
+
+  Double_t xsigma = (hi-lo) * smear / Double_t(nt);     // smear sigma
+  
+  if (!addbias || x < lo || x > hi)
+    bias= 0.0;
+  else {
+    // actual bias is a quartic with maximum of "bias" in mid-range,
+    // dropping to 0 at edges so we don't shift events in/out of range
+    // (except a bit by smearing)
+    Double_t xm= (2*x-(hi+lo)) / (hi-lo), xm2= xm*xm;
+    bias *= 1.0-(xm2*xm2);
+  }
+  
+  Double_t delta= xsigma <= 0.0 ? bias : gRandom->Gaus (bias, xsigma);     // bias and smear
+  if (verbose>=3) cout << "SMEAR " << x << " " << x1smear << " " << xsigma << endl;
+  return x+delta;
+
+}
+
+Double_t NDimUnfolding::Overflow (Double_t x, Int_t nb, Double_t lo, Double_t hi) const
+{
+  if (overflow!=2)    return x;
+  else if   (x < lo)  return lo + (hi-lo) / Double_t(2*nb);
+  else if (!(x < hi)) return hi - (hi-lo) / Double_t(2*nb);
+  else return x;
+}
+
+//==============================================================================
+// Constructors and destructor
+//==============================================================================
+
+NDimUnfolding::NDimUnfolding (const char* name)
+  : TNamed(name,name)
+{
+  Reset();
+  SetDefaults();
+}
+
+// pass a vector of arguments - SHLee
+NDimUnfolding::NDimUnfolding (const char* name, int argc, const char* const* argv)
+  : TNamed(name,name)
+{
+  Reset();
+  error= SetArgs (argc, argv);
+}
+
+// pass an argument - SHLee
+NDimUnfolding::NDimUnfolding (const char* name, const char* args)
+  : TNamed(name,name)
+{
+  Reset();
+  const char* const argv[]= { name, args };
+  error= SetArgs (2, argv, true);
+}
+
+NDimUnfolding::~NDimUnfolding()
+{
+  delete errors;   errors=   0;
+  delete parms;    parms=   0;
+  delete response; response= 0;
+  delete unfold;   unfold=   0;
+  delete canvas;   canvas=   0;
+  delete ps;       ps=       0;
+}
+
+//==============================================================================
+// Utility routines
+//==============================================================================
+
+void NDimUnfolding::Reset()
+{
+  errors= 0;
+  parms= 0;
+  response= 0;
+  unfold= 0;
+  canvas= 0;
+  ps= 0;
+  hTrain= hTrainTrue= hTrainFake= hTrue= hMeas= hFake= hReco= hRes= hPulls=
+    hUnfErr= hToyErr= hParmChi2= hParmErr= hParmRes= hParmRms= 0;
+  hResmat= hCorr= hMeasCorr= 0;
+  fitFunc= trueFunc= 0;
+  ntChi2= 0;
+  lTrain= lTest= lErrors= 0;
+  error= ipad= 0;
+  dim= 3;
+  do_closure_test = false;
+  nbPDF= 500;
+  wpaper= hpaper= 0;
+}
+
+void NDimUnfolding::SetDefaults()
+{
+  ArgVars args;
+  Parms (args);
+  args.SetDefaults();
+}
+
+int NDimUnfolding::SetArgs (int argc, const char* const* argv, bool split)
+{
+  ArgVars args;
+  // Set hardcoded parameters - SHLee
+  Parms (args);
+  // Set passed parameters -SHLee
+  return args.SetArgs (argc, argv, split);
+}
+
+void NDimUnfolding::Init()
+{
+  if (setname.Length()>0) SetName (setname);
+  rootfile= GetName();
+  rootfile += ".root";
+
+ if(inmc.Length()>0){
+  tfMC = new TFile(inmc.Data(),"read");  
+  cout<<"mc file name "<<inmc.Data()<<endl;
+  tfData = new TFile(indata.Data(),"read");
+  cout<<"data file name "<<indata.Data()<<endl;
+  ttMC = (TTree*) tfMC->Get("minitree");
+  ttData = (TTree*) tfData->Get("minitree");
+
+   ttMC->SetBranchAddress(Form("%s_gen",varnamex1.Data()),&x1t);
+   ttMC->SetBranchAddress(Form("%s_rec",varnamex1.Data()),&x1m);
+   ntx1 = nmx1;
+   ntbins = ntx1;
+   nmbins = nmx1;
+   mscalex1= (nmx1==ntx1) ? 1.0 : Double_t(nmx1)/Double_t(ntx1);
+   cout<<"nbinsx mea "<<nmx1 <<" true "<<ntx1<<endl;
+ 
+  if(GetDimension() > 1){
+   ttMC->SetBranchAddress(Form("%s_gen",varnamex2.Data()),&x2t);
+   ttMC->SetBranchAddress(Form("%s_rec",varnamex2.Data()),&x2m);
+   ntx2 = nmx2; 
+   ntbins = ntx1*ntx2;
+   nmbins = nmx1*nmx2;
+   mscalex2= (nmx2==ntx2) ? 1.0 : Double_t(nmx2)/Double_t(ntx2);
+   cout<<"nbinsx2 mea "<<nmx2 <<" true "<<ntx2<<endl;
+  }
+  if(GetDimension() > 2){
+   ttMC->SetBranchAddress(Form("%s_gen",varnamex3.Data()),&x3t);
+   ttMC->SetBranchAddress(Form("%s_rec",varnamex3.Data()),&x3m);
+   ntx3 = nmx3;
+   ntbins = ntx1*ntx2*ntx3;
+   nmbins = nmx1*nmx2*nmx3;
+   mscalex3= (nmx3==ntx3) ? 1.0 : Double_t(nmx3)/Double_t(ntx3);
+   cout<<"nbinsz mea "<<nmx3 <<" true "<<ntx3<<endl;
+  }
+  
+ }
+
+
+  if (overflow==2) {
+    Double_t xwid= (x1hi-x1lo) / ntx1;
+    x1lo -= xwid;
+    x1hi += xwid;
+    ntx1 += 2;
+    nmx1 += 2;
+  }
+
+  if (onepage) {
+    if (hpaper==0) hpaper= 900;
+  } else {
+    if (wpaper==0) wpaper= 750;
+    if (hpaper==0) hpaper= 300;
+  }
+/*
+  if (seed>=0) {
+    gRandom->SetSeed(seed);   // seed=0, uses a unique (UUID) seed each job (see TRandom3::SetSeed)
+#ifdef USE_ROOFIT
+    RooRandom::randomGenerator()->SetSeed(seed ? seed+8243 : 0);
+#endif
+  } 
+*/
+}
+
+Int_t NDimUnfolding::CheckParms()
+{
+  if (addbias==-1)
+    addbias= (method==RooUnfold::kBinByBin || method==RooUnfold::kInvert) ? 0 : 1;  // bin-by-bin/invert methods can't handle bias
+
+  if (verbose>=0) PrintParms (cout);
+
+  if (x1lo >= x1hi) {cout << "Error: x1lo ("    << x1lo    << ") >= x1hi(" << x1hi << ")" << endl; error = 2;}
+  if (ntest<=0)   {cout << "Error: ntest ("  << ntest  << ") <= 0"                  << endl; error = 2;}
+  if (ntrain<=0)  {cout << "Error: ntrain (" << ntrain << ") <= 0"                  << endl; error = 2;}
+  if (nmx1<=0)     {cout << "Error: nmx1 ("    << nmx1    << ") <= 0"                  << endl; error = 2;}
+  if (ntx1<=0)     {cout << "Error: ntx1 ("    << ntx1    << ") <= 0"                  << endl; error = 2;}
+  if (ftestx1<0)   {cout << "Error: ftestx1 (" << ftestx1 << ") < 0"                   << endl; error = 2;}
+  if (ftrainx1<0)  {cout << "Error: ftrainx1 ("<< ftrainx1<< ") < 0"                   << endl; error = 2;}
+  return error;
+}
+
+void NDimUnfolding::PrintParms (std::ostream& o) const
+{
+  ArgVars args;
+  const_cast<NDimUnfolding*>(this)->Parms (args);
+  o << GetName() << " ";
+  args.Print (o);
+  o << endl;
+}
+
+TH2D* NDimUnfolding::CorrelationHist (const TMatrixD& cov,
+                                             const char* name, const char* title,
+                                             Double_t lo, Double_t hi)
+{
+  Int_t nb= cov.GetNrows();
+  TH2D* h= new TH2D (name, title, nb, lo, hi, nb, lo, hi);
+  h->SetAxisRange (-1.0, 1.0, "Z");
+  for(int i=0; i < nb; i++)
+    for(int j=0; j < nb; j++) {
+      Double_t Viijj= cov(i,i)*cov(j,j);
+      if (Viijj>0.0) h->SetBinContent (i+1, j+1, cov(i,j)/sqrt(Viijj));
+    }
+  return h;
+}
+
+void NDimUnfolding::Legend (TLegend*& legend, TH1* truth, TH1* fake, TH1* meas, TH1* reco, TF1* ff, TF1* tf)
+{
+  legend= new TLegend (0.79, (tf ? 0.62 : reco ? 0.72 : 0.75), 0.894, 0.89);
+  legend->SetTextSize(0.035);
+  legend->SetTextFont(42);
+  legend->AddEntry (truth, "truth",         "L");
+//  if (fake)
+//  legend->AddEntry (fake,  "fakes",         "L");
+  legend->AddEntry (meas,  "measured",      "L");
+  if (reco)
+  legend->AddEntry (reco,  "reconstructed", "P");
+  if (ff)
+  legend->AddEntry (ff->GetHistogram(), "measured fit", "L");
+  if (tf)
+  legend->AddEntry (tf,    "truth fit",     "L");
+  legend->Draw();
+}
+
+//==============================================================================
+// Set histogram Y-axis display range
+//==============================================================================
+
+void NDimUnfolding::setmax (TH1* h,
+                                   const TH1* h1, const TH1* h2, const TH1* h3,
+                                   const TH1* h4, const TH1* h5, const TH1* h6)
+{
+  // Get the maximum y value of up to 7 histograms
+  // Add 10% to match behaviour of ROOT's automatic scaling
+  Double_t maxval= h1 ? h1->GetMaximum() : -DBL_MAX;
+  if (h2 && h2->GetMaximum() > maxval) maxval= h2->GetMaximum();
+  if (h3 && h3->GetMaximum() > maxval) maxval= h3->GetMaximum();
+  if (h4 && h4->GetMaximum() > maxval) maxval= h4->GetMaximum();
+  if (h5 && h5->GetMaximum() > maxval) maxval= h5->GetMaximum();
+  if (h6 && h6->GetMaximum() > maxval) maxval= h6->GetMaximum();
+  h->SetMinimum (0.0);
+  if (maxval > h->GetMaximum()) h->SetMaximum (1.1*maxval);
+}
+
+TH1D* NDimUnfolding::ProjectionX (const TH1* h, const char* name, const char* title, Option_t* opt)
+{
+  const TH2* h2= dynamic_cast<const TH2*>(h);
+  TH1D* h1= h2->ProjectionX (name, 1, h->GetNbinsY(), opt);
+  if (title) h1->SetTitle (title);
+  return h1;
+}
+
+TH1D* NDimUnfolding::ProjectionY (const TH1* h, const char* name, const char* title, Option_t* opt)
+{
+  const TH2* h2= dynamic_cast<const TH2*>(h);
+  TH1D* h1= h2->ProjectionY (name, 1, h->GetNbinsX(), opt);
+  if (title) h1->SetTitle (title);
+  return h1;
+}
+
+TH1D* NDimUnfolding::Projection1D (const TH1* h, Option_t* xyz, const char* name, const char* title, Option_t* opt)
+{
+  const TH3* h3= dynamic_cast<const TH3*>(h);
+  TString opts (xyz);
+  opts += opt;
+  opts += "NUFNOF";
+  TH1D* h1= dynamic_cast<TH1D*>(h3->Project3D (opts));
+  h1->SetLineColor (h3->GetLineColor());  // doesn't seem to be copied in older versions of ROOT
+  if (h1 && name)  h1->SetName  (name);
+  if (h1 && title) h1->SetTitle (title);
+  return h1;
+}
+
+TH2D* NDimUnfolding::Projection2D (const TH1* h, Option_t* xyz, const char* name, const char* title, Option_t* opt)
+{
+  const TH3* h3= dynamic_cast<const TH3*>(h);
+  TString opts (xyz);
+  opts += opt;
+  opts += "NUFNOF";
+  TH2D* h2= dynamic_cast<TH2D*>(h3->Project3D (opts));
+  if (h2 && name)  h2->SetName  (name);
+  if (h2 && title) h2->SetTitle (title);
+  return h2;
+}
+
+
+
+#endif
